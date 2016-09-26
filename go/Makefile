@@ -4,49 +4,91 @@
 
 export GO15VENDOREXPERIMENT = 1
 
-NAME=PROJECTNAME
-DESC=
-PREFIX ?= /usr/local
-VERSION=$(shell git describe --tags --always --dirty)
-GOVERSION = $(shell go version)
-BUILDTIME = $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-MAN_TIME = $(shell date -u +"%B %d, %Y")
-BUILDER = $(shell echo "`git config user.name` <`git config user.email`>")
+# variable definitions
+NAME := PROJECTNAME
+DESC := experimental linter for Makefiles
+PREFIX ?= usr/local
+VERSION := $(shell git describe --tags --always --dirty)
+GOVERSION := $(shell go version)
+BUILDTIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILDDATE := $(shell date -u +"%B %d, %Y")
+BUILDER := $(shell echo "`git config user.name` <`git config user.email`>")
 PKG_RELEASE ?= 1
-PROJECT_URL="https://github.com/mrtazz/$(NAME)"
-SOURCES=cmd/$(NAME)/main.go $(NAME).go
-LDFLAGS=-X 'main.version=$(VERSION)' \
-				-X 'main.buildTime=$(BUILDTIME)'\
-				-X 'main.builder=$(BUILDER)'\
-				-X 'main.goversion=$(GOVERSION)'
-TARGETS=$(PREFIX)/bin/$(NAME) $(PREFIX)/share/man/man1/$(NAME).1
+PROJECT_URL := "https://github.com/mrtazz/$(NAME)"
+LDFLAGS := -X 'main.version=$(VERSION)' \
+           -X 'main.buildTime=$(BUILDTIME)' \
+           -X 'main.builder=$(BUILDER)' \
+           -X 'main.goversion=$(GOVERSION)'
 
-$(NAME): $(SOURCES)
+PACKAGES := $(shell find ./* -type d | grep -v vendor)
+
+
+CMD_SOURCES := $(shell find cmd -name main.go)
+TARGETS := $(patsubst cmd/%/main.go,%,$(CMD_SOURCES))
+MAN_SOURCES := $(shell find man -name "*.md")
+MAN_TARGETS := $(patsubst man/man1/%.md,%,$(MAN_SOURCES))
+
+INSTALLED_TARGETS = $(addprefix $(PREFIX)/bin/, $(TARGETS))
+INSTALLED_MAN_TARGETS = $(addprefix $(PREFIX)/share/man/man1/, $(MAN_TARGETS))
+
+# source, dependency and build definitions
+DEPDIR = .d
+MAKEDEPEND = echo "$@: $$(go list -f '{{ join .Deps "\n" }}' $< | awk '/github/ { gsub(/^github.com\/[a-z_-]*\/[a-z_-]*\//, ""); printf $$0"/*.go " }')" > $(DEPDIR)/$@.d
+
+$(DEPDIR)/%.d: ;
+.PRECIOUS: $(DEPDIR)/%.d
+
+$(DEPDIR):
+	install -d $@
+
+-include $(patsubst %,$(DEPDIR)/%.d,$(TARGETS))
+
+%: cmd/%/main.go $(DEPDIR) $(DEPDIR)/%.d
+	$(MAKEDEPEND)
 	go build -ldflags "$(LDFLAGS)" -o $@ $<
 
-$(PREFIX)/bin:
-	install -m 755 -d $@
+%.1: man/man1/%.1.md
+	sed "s/REPLACE_DATE/$(BUILDDATE)/" $< | pandoc -s -t man -o $@
 
-$(PREFIX)/bin/$(NAME): $(NAME) $(PREFIX)/bin
+all: $(TARGETS) $(MAN_TARGETS)
+.DEFAULT_GOAL:=all
+
+# development tasks
+test:
+	go test -v $$(go list ./... | grep -v /vendor/)
+
+coverage:
+	@echo "mode: set" > cover.out
+	@for package in $(PACKAGES); do \
+		if ls $${package}/*.go &> /dev/null; then  \
+		go test -coverprofile=$${package}/profile.out $${package}; fi; \
+		if test -f $${package}/profile.out; then \
+	 	cat $${package}/profile.out | grep -v "mode: set" >> cover.out; fi; \
+	done
+	@-go tool cover -html=cover.out -o cover.html
+
+benchmark:
+	@echo "Running tests..."
+	@go test -bench=. ${NAME}
+
+govendor:
+	    go get -u github.com/kardianos/govendor
+
+# install tasks
+$(PREFIX)/bin/%: %
+	install -d $$(dirname $@)
 	install -m 755 $< $@
 
-$(NAME).1: $(NAME).1.md
-	sed -e "s/REPLACE_DATE/$(MAN_TIME)"
-	txt2man -t "$(NAME)" -s 1 -v "User Manual" $< > $@
+$(PREFIX)/share/man/man1/%: %
+	install -d $$(dirname $@)
+	install -m 644 $< $@
 
-$(PREFIX)/share/man/man1:
-	install -m 755 -d $@
-
-$(PREFIX)/share/man/man1/$(NAME).1: $(NAME).1 $(PREFIX)/share/man/man1
-	install -m 755 $< $@
-
-.PHONY: test rpm deb local-install packages coverage vet
-
-install: $(TARGETS)
+install: $(INSTALLED_TARGETS) $(INSTALLED_MAN_TARGETS)
 
 local-install:
-	$(MAKE) install PREFIX=usr
+	$(MAKE) install PREFIX=usr/local
 
+# packaging tasks
 packages: local-install rpm deb
 
 deploy-packages: packages
@@ -81,56 +123,23 @@ deb: $(SOURCES)
     --vendor mrtazz \
     usr
 
-GAUGES_CODE=
 
-jekyll:
-	install -d ./docs
-	echo "gaugesid: $(GAUGES_CODE)" > docs/_config.yml
-	echo "projecturl: $(PROJECT_URL)" >> docs/_config.yml
-	echo "basesite: http://www.unwiredcouch.com" >> docs/_config.yml
-	echo "markdown: redcarpet" >> docs/_config.yml
-	echo "---" > docs/index.md
-	echo "layout: project" >> docs/index.md
-	echo "title: $(NAME)" >> docs/index.md
-	echo "---" >> docs/index.md
-	cat README.md >> docs/index.md
+# clean up tasks
+clean-deps:
+	$(RM) -r $(DEPDIR)
 
-docs: jekyll
+clean: clean-docs clean-deps
+	$(RM) -r ./usr
+	$(RM) $(TARGETS)
 
 clean-docs:
-	rm -rf ./docs
+	$(RM) $(MAN_TARGETS)
 
-deploy-docs: docs
-	@cd docs && git init && git remote add upstream "https://${GH_TOKEN}@github.com/mrtazz/$(NAME).git" && \
-	git submodule add https://github.com/mrtazz/jekyll-layouts.git ./_layouts && \
-	git submodule update --init && \
-	git fetch upstream && git reset upstream/gh-pages && \
-	git config user.name 'Daniel Schauenberg' && git config user.email d@unwiredcouch.com && \
-	touch . && git add -A . && \
-	git commit -m "rebuild pages at $(VERSION)" && \
-	git push -q upstream HEAD:gh-pages
+pizza:
+	@echo ""
+	@echo "🍕 🍕 🍕 🍕 🍕 🍕   make.pizza 🍕 🍕 🍕 🍕 🍕 🍕 "
+	@echo ""
+	@echo "https://twitter.com/mrb_bk/status/760636493710983168"
+	@echo ""
 
-clean: clean-docs
-	rm -rf ./usr
-	rm $(NAME)
-	rm $(NAME).1
-
-test:
-	@go test -v .
-
-vet:
-	@go tool vet .
-
-coverage:
-	@-go test -v -coverprofile=cover.out github.com/mrtazz/$(NAME)
-	@-go tool cover -html=cover.out -o cover.html
-
-benchmark:
-	@echo "Running tests..."
-	@go test -bench=. ${NAME}
-
-format:
-	@go fmt .
-
-govendor:
-	    go get -u github.com/kardianos/govendor
+.PHONY: all test rpm deb install local-install packages govendor coverage clean-deps clean clean-docs pizza
